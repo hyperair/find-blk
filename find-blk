@@ -1,0 +1,82 @@
+#!/usr/bin/python3
+
+import collections
+import os
+import parted
+import re
+import subprocess
+import sys
+
+
+def get_devnos():
+    ret = {}
+
+    with open('/proc/partitions') as f:
+        # skip first two lines
+        next(f)
+        next(f)
+
+        splitre = re.compile(r' +')
+        for line in f:
+            cols = splitre.split(line.strip())
+            ret['{0}:{1}'.format(cols[0], cols[1])] = cols[3]
+
+    return ret
+
+dminfo = collections.namedtuple('dminfo',
+                                ['path', 'offset', 'length', 'logical_start'])
+
+def get_dm_rdeps():
+    rdeps = collections.defaultdict(set)
+    output = subprocess.check_output(['dmsetup', 'table']).decode('utf-8')
+
+    for line in output.split('\n'):
+        if not line:
+            continue
+
+        cols = line.split(' ')
+
+        path = '/dev/mapper/' + cols[0].rstrip(':')
+        offset = int(cols[-1])
+        length = int(cols[2])
+        logical_start = int(cols[1])
+        parent_devno = cols[-2]
+
+        rdeps[parent_devno].add(dminfo(path, offset, length, logical_start))
+
+    return rdeps
+
+partitions = get_devnos()
+dm_rdeps = get_dm_rdeps()
+
+def show_block_dev(path, lba):
+    print('{0}: {1}'.format(path, lba))
+
+    if re.match(r'^/dev/sd[a-z]$', path):
+        disk = parted.newDisk(parted.getDevice(path))
+        partition = disk.getPartitionBySector(lba)
+
+        part_lba = lba - partition.geometry.start
+
+        show_block_dev(partition.path, part_lba)
+
+    else:
+        devno = os.stat(path).st_rdev
+        major = os.major(devno)
+        minor = os.minor(devno)
+
+        devnostr = '{0}:{1}'.format(major, minor)
+
+        try:
+            for dev in dm_rdeps[devnostr]:
+                if dev.offset <= lba < dev.offset + dev.length:
+                    show_block_dev(dev.path,
+                                   lba - dev.offset + dev.logical_start)
+
+        except KeyError:
+            pass
+
+lba = int(sys.argv[1])
+dev = sys.argv[2]
+
+show_block_dev(dev, lba)
